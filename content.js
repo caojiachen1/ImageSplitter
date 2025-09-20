@@ -80,8 +80,8 @@ async function loadImageToCanvas(srcUrl, forceFetch = false) {
 function detectSplits(imageData, width, height) {
   const { data } = imageData;
   
-  // 计算每行与上一行的绝对差（RGB，忽略 alpha）
-  const diffs = new Float64Array(height);
+  // 方法1: 计算每行与上一行的绝对差（RGB）
+  const rowDiffs = new Float64Array(height);
   for (let y = 1; y < height; y++) {
     let rowDiff = 0;
     let base1 = (y - 1) * width * 4;
@@ -91,73 +91,184 @@ function detectSplits(imageData, width, height) {
       const i2 = base2 + x * 4;
       rowDiff += Math.abs(data[i1] - data[i2]) + Math.abs(data[i1 + 1] - data[i2 + 1]) + Math.abs(data[i1 + 2] - data[i2 + 2]);
     }
-    diffs[y] = rowDiff / width; // 归一为每像素平均差
+    rowDiffs[y] = rowDiff / width;
   }
 
-  // 改进的平滑处理 - 使用更大的窗口
+  // 方法2: 计算每行的颜色一致性（方差）
+  const rowVariances = new Float64Array(height);
+  for (let y = 0; y < height; y++) {
+    let rSum = 0, gSum = 0, bSum = 0;
+    let base = y * width * 4;
+    
+    // 计算平均颜色
+    for (let x = 0; x < width; x++) {
+      const i = base + x * 4;
+      rSum += data[i];
+      gSum += data[i + 1];
+      bSum += data[i + 2];
+    }
+    const rMean = rSum / width;
+    const gMean = gSum / width;
+    const bMean = bSum / width;
+    
+    // 计算方差
+    let variance = 0;
+    for (let x = 0; x < width; x++) {
+      const i = base + x * 4;
+      variance += Math.pow(data[i] - rMean, 2) + 
+                  Math.pow(data[i + 1] - gMean, 2) + 
+                  Math.pow(data[i + 2] - bMean, 2);
+    }
+    rowVariances[y] = variance / width;
+  }
+
+  // 方法3: 检测颜色区域边界
+  const colorBoundaries = new Float64Array(height);
+  const regionSize = Math.max(3, Math.floor(height * 0.01)); // 动态区域大小
+  
+  for (let y = regionSize; y < height - regionSize; y++) {
+    // 计算上方区域平均颜色
+    let upR = 0, upG = 0, upB = 0;
+    for (let ty = y - regionSize; ty < y; ty++) {
+      for (let x = 0; x < width; x++) {
+        const idx = (ty * width + x) * 4;
+        upR += data[idx];
+        upG += data[idx + 1];
+        upB += data[idx + 2];
+      }
+    }
+    const upCount = regionSize * width;
+    upR /= upCount; upG /= upCount; upB /= upCount;
+    
+    // 计算下方区域平均颜色
+    let downR = 0, downG = 0, downB = 0;
+    for (let ty = y; ty < y + regionSize; ty++) {
+      for (let x = 0; x < width; x++) {
+        const idx = (ty * width + x) * 4;
+        downR += data[idx];
+        downG += data[idx + 1];
+        downB += data[idx + 2];
+      }
+    }
+    downR /= upCount; downG /= upCount; downB /= upCount;
+    
+    // 计算颜色距离
+    colorBoundaries[y] = Math.sqrt(
+      Math.pow(upR - downR, 2) + 
+      Math.pow(upG - downG, 2) + 
+      Math.pow(upB - downB, 2)
+    );
+  }
+
+  // 方法4: 水平边缘检测（类似Sobel算子）
+  const edgeStrength = new Float64Array(height);
+  for (let y = 1; y < height - 1; y++) {
+    let edge = 0;
+    const prevBase = (y - 1) * width * 4;
+    const nextBase = (y + 1) * width * 4;
+    
+    for (let x = 0; x < width; x++) {
+      const prevIdx = prevBase + x * 4;
+      const nextIdx = nextBase + x * 4;
+      
+      // 计算垂直梯度
+      const rGrad = Math.abs(data[nextIdx] - data[prevIdx]);
+      const gGrad = Math.abs(data[nextIdx + 1] - data[prevIdx + 1]);
+      const bGrad = Math.abs(data[nextIdx + 2] - data[prevIdx + 2]);
+      
+      edge += rGrad + gGrad + bGrad;
+    }
+    edgeStrength[y] = edge / width;
+  }
+
+  // 综合多种检测方法
+  const combined = new Float64Array(height);
+  for (let y = 0; y < height; y++) {
+    // 归一化各种指标到0-1范围
+    const normalizedRowDiff = Math.min(1, rowDiffs[y] / 100);
+    const normalizedVariance = Math.min(1, rowVariances[y] / 10000);
+    const normalizedBoundary = Math.min(1, colorBoundaries[y] / 100);
+    const normalizedEdge = Math.min(1, edgeStrength[y] / 100);
+    
+    // 加权组合，行差异和颜色边界权重较高
+    combined[y] = normalizedRowDiff * 0.4 + 
+                  normalizedBoundary * 0.3 + 
+                  normalizedEdge * 0.2 + 
+                  (1 - normalizedVariance) * 0.1; // 低方差（一致性）也是边界特征
+  }
+
+  // 平滑处理
   const smooth = new Float64Array(height);
-  const W = 5; // 增加平滑窗口
+  const W = 3;
   for (let y = 0; y < height; y++) {
     let s = 0, c = 0;
     for (let k = -W; k <= W; k++) {
       const yy = y + k;
-      if (yy >= 0 && yy < height) { s += diffs[yy]; c++; }
+      if (yy >= 0 && yy < height) { s += combined[yy]; c++; }
     }
     smooth[y] = s / (c || 1);
   }
 
-  // 计算统计信息
-  let mean = 0; 
-  for (let y = 0; y < height; y++) mean += smooth[y];
-  mean /= height;
-  
-  let varSum = 0; 
-  for (let y = 0; y < height; y++) varSum += (smooth[y] - mean) ** 2;
-  const stdev = Math.sqrt(varSum / height);
-  
-  // 计算更高的分位数作为阈值，避免噪声干扰
+  // 自适应阈值计算
   const sorted = Array.from(smooth).sort((a, b) => a - b);
-  const q95 = sorted[Math.floor(0.95 * sorted.length)]; // 95%分位数
-  const threshold = Math.max(mean + 2.5 * stdev, q95); // 更严格的阈值
+  const q90 = sorted[Math.floor(0.90 * sorted.length)];
+  const q95 = sorted[Math.floor(0.95 * sorted.length)];
+  const q99 = sorted[Math.floor(0.99 * sorted.length)];
+  
+  // 根据图片特征选择合适的阈值
+  let threshold;
+  if (q99 - q90 > 0.3) {
+    // 高对比度图片，使用较高阈值
+    threshold = q95;
+  } else {
+    // 低对比度图片，使用较低阈值
+    threshold = q90;
+  }
 
-  // 使用更严格的峰值检测
+  // 改进的峰值检测
   const candidates = [];
-  const minPeakWidth = 3; // 峰值最小宽度
+  const minPeakWidth = 2;
+  const minPeakHeight = threshold;
   
   for (let y = minPeakWidth; y < height - minPeakWidth; y++) {
-    if (smooth[y] > threshold) {
-      // 检查是否为真正的峰值：需要比周围更大范围的点都大
-      let isPeak = true;
+    if (smooth[y] > minPeakHeight) {
+      // 检查是否为局部最大值
+      let isLocalMax = true;
       for (let k = 1; k <= minPeakWidth; k++) {
         if (smooth[y] < smooth[y - k] || smooth[y] < smooth[y + k]) {
-          isPeak = false;
+          isLocalMax = false;
           break;
         }
       }
       
-      if (isPeak) {
-        // 验证这是否为分割线，并获取精确位置
-        const preciseY = findPreciseSplitLine(imageData, width, height, y);
-        if (preciseY !== null) {
-          candidates.push(preciseY);
+      if (isLocalMax) {
+        // 进一步验证：检查峰值的突出程度
+        const leftMin = Math.min(...Array.from(smooth.slice(Math.max(0, y - 10), y)));
+        const rightMin = Math.min(...Array.from(smooth.slice(y + 1, Math.min(height, y + 11))));
+        const prominence = smooth[y] - Math.max(leftMin, rightMin);
+        
+        if (prominence > threshold * 0.3) {
+          // 精确定位分割线
+          const preciseY = findPreciseSplitLine(imageData, width, height, y);
+          if (preciseY !== null) {
+            candidates.push(preciseY);
+          }
         }
       }
     }
   }
 
-  // 合并相近的候选，最小间隔增加到 20px
+  // 合并相近的候选
   const merged = [];
   let group = [];
-  const MIN_GAP = 20;
+  const MIN_GAP = Math.max(15, Math.floor(height * 0.02)); // 动态最小间隔
   
-  // 先对候选位置排序
   candidates.sort((a, b) => a - b);
   
   for (const y of candidates) {
     if (!group.length || y - group[group.length - 1] <= MIN_GAP) {
       group.push(y);
     } else {
-      // 选择组内最中心的位置（最能代表真实分割线的位置）
       const centerY = Math.round(group.reduce((sum, yy) => sum + yy, 0) / group.length);
       merged.push(centerY);
       group = [y];
@@ -168,8 +279,8 @@ function detectSplits(imageData, width, height) {
     merged.push(centerY);
   }
 
-  // 去除靠近边缘或间隔过小的分割线
-  const MIN_SLICE = 50; // 增加每段最小高度
+  // 最终过滤：确保分割片段有足够大小
+  const MIN_SLICE = Math.max(30, Math.floor(height * 0.03));
   const lines = [];
   let prev = 0;
   
@@ -180,7 +291,6 @@ function detectSplits(imageData, width, height) {
     }
   }
   
-  // 去掉末尾 height
   if (lines.length && lines[lines.length - 1] === height) lines.pop();
   return lines;
 }
@@ -188,58 +298,148 @@ function detectSplits(imageData, width, height) {
 // 验证是否为有效的分割线，并返回精确的分割位置
 function findPreciseSplitLine(imageData, width, height, roughY) {
   const { data } = imageData;
-  const searchRange = 5; // 在粗略位置附近搜索精确位置
-  const checkHeight = Math.min(10, Math.floor(height * 0.02));
+  const searchRange = 8; // 扩大搜索范围
+  const checkHeight = Math.min(15, Math.floor(height * 0.03)); // 增加检查区域
   
   let bestY = roughY;
-  let maxColorDiff = 0;
+  let maxScore = 0;
   
   // 在粗略位置附近搜索最佳分割线
   for (let y = Math.max(checkHeight, roughY - searchRange); 
        y <= Math.min(height - checkHeight - 1, roughY + searchRange); y++) {
     
-    // 计算该位置上下区域的颜色差异
-    let upR = 0, upG = 0, upB = 0;
-    let downR = 0, downG = 0, downB = 0;
-    let count = 0;
+    // 计算多种特征的综合评分
+    const colorScore = calculateColorDifferenceScore(data, width, height, y, checkHeight);
+    const consistencyScore = calculateRegionConsistencyScore(data, width, height, y, checkHeight);
+    const edgeScore = calculateEdgeScore(data, width, height, y);
     
-    // 计算上方区域平均颜色
-    for (let ty = y - checkHeight; ty < y; ty++) {
-      for (let x = 0; x < width; x++) {
-        const idx = (ty * width + x) * 4;
-        upR += data[idx];
-        upG += data[idx + 1];
-        upB += data[idx + 2];
-        count++;
-      }
-    }
+    // 综合评分
+    const totalScore = colorScore * 0.5 + consistencyScore * 0.3 + edgeScore * 0.2;
     
-    // 计算下方区域平均颜色
-    for (let ty = y + 1; ty <= y + checkHeight; ty++) {
-      for (let x = 0; x < width; x++) {
-        const idx = (ty * width + x) * 4;
-        downR += data[idx];
-        downG += data[idx + 1];
-        downB += data[idx + 2];
-      }
-    }
-    
-    if (count === 0) continue;
-    
-    upR /= count; upG /= count; upB /= count;
-    downR /= count; downG /= count; downB /= count;
-    
-    // 计算颜色差异
-    const colorDiff = Math.abs(upR - downR) + Math.abs(upG - downG) + Math.abs(upB - downB);
-    
-    if (colorDiff > maxColorDiff) {
-      maxColorDiff = colorDiff;
+    if (totalScore > maxScore) {
+      maxScore = totalScore;
       bestY = y;
     }
   }
   
-  // 如果颜色差异足够大，返回精确位置；否则返回null
-  return maxColorDiff > 30 ? bestY : null;
+  // 如果综合评分足够高，返回精确位置
+  return maxScore > 30 ? bestY : null;
+}
+
+// 计算颜色差异评分
+function calculateColorDifferenceScore(data, width, height, y, checkHeight) {
+  let upR = 0, upG = 0, upB = 0;
+  let downR = 0, downG = 0, downB = 0;
+  let count = 0;
+  
+  // 计算上方区域平均颜色
+  for (let ty = y - checkHeight; ty < y; ty++) {
+    for (let x = 0; x < width; x++) {
+      const idx = (ty * width + x) * 4;
+      upR += data[idx];
+      upG += data[idx + 1];
+      upB += data[idx + 2];
+      count++;
+    }
+  }
+  
+  // 计算下方区域平均颜色
+  for (let ty = y + 1; ty <= y + checkHeight; ty++) {
+    for (let x = 0; x < width; x++) {
+      const idx = (ty * width + x) * 4;
+      downR += data[idx];
+      downG += data[idx + 1];
+      downB += data[idx + 2];
+    }
+  }
+  
+  if (count === 0) return 0;
+  
+  upR /= count; upG /= count; upB /= count;
+  downR /= count; downG /= count; downB /= count;
+  
+  // 计算Lab色彩空间的感知差异（更准确）
+  const deltaE = calculateDeltaE(upR, upG, upB, downR, downG, downB);
+  return Math.min(100, deltaE * 2);
+}
+
+// 计算区域一致性评分
+function calculateRegionConsistencyScore(data, width, height, y, checkHeight) {
+  const upVariance = calculateRegionVariance(data, width, y - checkHeight, y);
+  const downVariance = calculateRegionVariance(data, width, y + 1, y + checkHeight + 1);
+  
+  // 两个区域内部越一致（方差越小），分割线越可能正确
+  const avgVariance = (upVariance + downVariance) / 2;
+  return Math.max(0, 100 - avgVariance / 100);
+}
+
+// 计算边缘强度评分
+function calculateEdgeScore(data, width, height, y) {
+  if (y === 0 || y >= height - 1) return 0;
+  
+  let edgeStrength = 0;
+  const prevBase = (y - 1) * width * 4;
+  const nextBase = (y + 1) * width * 4;
+  
+  for (let x = 0; x < width; x++) {
+    const prevIdx = prevBase + x * 4;
+    const nextIdx = nextBase + x * 4;
+    
+    const rGrad = Math.abs(data[nextIdx] - data[prevIdx]);
+    const gGrad = Math.abs(data[nextIdx + 1] - data[prevIdx + 1]);
+    const bGrad = Math.abs(data[nextIdx + 2] - data[prevIdx + 2]);
+    
+    edgeStrength += rGrad + gGrad + bGrad;
+  }
+  
+  return Math.min(100, edgeStrength / (width * 3));
+}
+
+// 计算区域方差
+function calculateRegionVariance(data, width, startY, endY) {
+  let rSum = 0, gSum = 0, bSum = 0;
+  let count = 0;
+  
+  // 计算平均值
+  for (let y = startY; y < endY; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = (y * width + x) * 4;
+      rSum += data[idx];
+      gSum += data[idx + 1];
+      bSum += data[idx + 2];
+      count++;
+    }
+  }
+  
+  if (count === 0) return 0;
+  
+  const rMean = rSum / count;
+  const gMean = gSum / count;
+  const bMean = bSum / count;
+  
+  // 计算方差
+  let variance = 0;
+  for (let y = startY; y < endY; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = (y * width + x) * 4;
+      variance += Math.pow(data[idx] - rMean, 2) + 
+                  Math.pow(data[idx + 1] - gMean, 2) + 
+                  Math.pow(data[idx + 2] - bMean, 2);
+    }
+  }
+  
+  return variance / count;
+}
+
+// 计算感知颜色差异（简化的Delta E）
+function calculateDeltaE(r1, g1, b1, r2, g2, b2) {
+  // 简化的Lab颜色空间转换和Delta E计算
+  const deltaR = r1 - r2;
+  const deltaG = g1 - g2;
+  const deltaB = b1 - b2;
+  
+  // 权重反映人眼对不同颜色的敏感度
+  return Math.sqrt(2 * deltaR * deltaR + 4 * deltaG * deltaG + 3 * deltaB * deltaB);
 }
 
 // 验证是否为有效的分割线
