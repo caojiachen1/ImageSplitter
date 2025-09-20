@@ -79,7 +79,8 @@ async function loadImageToCanvas(srcUrl, forceFetch = false) {
 
 function detectSplits(imageData, width, height) {
   const { data } = imageData;
-  // 计算每行与上一行的绝对差（RGB，忽略 alpha），并进行滑动均值平滑
+  
+  // 计算每行与上一行的绝对差（RGB，忽略 alpha）
   const diffs = new Float64Array(height);
   for (let y = 1; y < height; y++) {
     let rowDiff = 0;
@@ -93,9 +94,9 @@ function detectSplits(imageData, width, height) {
     diffs[y] = rowDiff / width; // 归一为每像素平均差
   }
 
-  // 简单平滑
+  // 改进的平滑处理 - 使用更大的窗口
   const smooth = new Float64Array(height);
-  const W = 3;
+  const W = 5; // 增加平滑窗口
   for (let y = 0; y < height; y++) {
     let s = 0, c = 0;
     for (let k = -W; k <= W; k++) {
@@ -105,55 +106,145 @@ function detectSplits(imageData, width, height) {
     smooth[y] = s / (c || 1);
   }
 
-  // 动态阈值：均值 + 1.5*标准差
-  let mean = 0; for (let y = 0; y < height; y++) mean += smooth[y];
+  // 计算统计信息
+  let mean = 0; 
+  for (let y = 0; y < height; y++) mean += smooth[y];
   mean /= height;
-  let varSum = 0; for (let y = 0; y < height; y++) varSum += (smooth[y] - mean) ** 2;
+  
+  let varSum = 0; 
+  for (let y = 0; y < height; y++) varSum += (smooth[y] - mean) ** 2;
   const stdev = Math.sqrt(varSum / height);
-  const threshold = mean + 1.5 * stdev;
+  
+  // 计算更高的分位数作为阈值，避免噪声干扰
+  const sorted = Array.from(smooth).sort((a, b) => a - b);
+  const q95 = sorted[Math.floor(0.95 * sorted.length)]; // 95%分位数
+  const threshold = Math.max(mean + 2.5 * stdev, q95); // 更严格的阈值
 
-  // 选择峰值作为候选分割线
+  // 使用更严格的峰值检测
   const candidates = [];
-  for (let y = 1; y < height - 1; y++) {
-    if (smooth[y] > threshold && smooth[y] >= smooth[y - 1] && smooth[y] >= smooth[y + 1]) {
-      candidates.push(y);
+  const minPeakWidth = 3; // 峰值最小宽度
+  
+  for (let y = minPeakWidth; y < height - minPeakWidth; y++) {
+    if (smooth[y] > threshold) {
+      // 检查是否为真正的峰值：需要比周围更大范围的点都大
+      let isPeak = true;
+      for (let k = 1; k <= minPeakWidth; k++) {
+        if (smooth[y] < smooth[y - k] || smooth[y] < smooth[y + k]) {
+          isPeak = false;
+          break;
+        }
+      }
+      
+      if (isPeak) {
+        // 验证这是否为分割线，并获取精确位置
+        const preciseY = findPreciseSplitLine(imageData, width, height, y);
+        if (preciseY !== null) {
+          candidates.push(preciseY);
+        }
+      }
     }
   }
 
-  // 合并相近的候选，最小间隔 12px，取峰值最高者
+  // 合并相近的候选，最小间隔增加到 20px
   const merged = [];
   let group = [];
-  const MIN_GAP = 12;
+  const MIN_GAP = 20;
+  
+  // 先对候选位置排序
+  candidates.sort((a, b) => a - b);
+  
   for (const y of candidates) {
     if (!group.length || y - group[group.length - 1] <= MIN_GAP) {
       group.push(y);
     } else {
-      // 选组内最高峰
-      let best = group[0];
-      for (const yy of group) if (smooth[yy] > smooth[best]) best = yy;
-      merged.push(best);
+      // 选择组内最中心的位置（最能代表真实分割线的位置）
+      const centerY = Math.round(group.reduce((sum, yy) => sum + yy, 0) / group.length);
+      merged.push(centerY);
       group = [y];
     }
   }
   if (group.length) {
-    let best = group[0];
-    for (const yy of group) if (smooth[yy] > smooth[best]) best = yy;
-    merged.push(best);
+    const centerY = Math.round(group.reduce((sum, yy) => sum + yy, 0) / group.length);
+    merged.push(centerY);
   }
 
   // 去除靠近边缘或间隔过小的分割线
-  const MIN_SLICE = 30; // 每段最小高度
+  const MIN_SLICE = 50; // 增加每段最小高度
   const lines = [];
   let prev = 0;
+  
   for (const y of [...merged, height]) {
     if (y - prev >= MIN_SLICE) {
       lines.push(y);
       prev = y;
     }
   }
-  // 去掉末尾 height（用于切片方便，稍后会再加）
+  
+  // 去掉末尾 height
   if (lines.length && lines[lines.length - 1] === height) lines.pop();
   return lines;
+}
+
+// 验证是否为有效的分割线，并返回精确的分割位置
+function findPreciseSplitLine(imageData, width, height, roughY) {
+  const { data } = imageData;
+  const searchRange = 5; // 在粗略位置附近搜索精确位置
+  const checkHeight = Math.min(10, Math.floor(height * 0.02));
+  
+  let bestY = roughY;
+  let maxColorDiff = 0;
+  
+  // 在粗略位置附近搜索最佳分割线
+  for (let y = Math.max(checkHeight, roughY - searchRange); 
+       y <= Math.min(height - checkHeight - 1, roughY + searchRange); y++) {
+    
+    // 计算该位置上下区域的颜色差异
+    let upR = 0, upG = 0, upB = 0;
+    let downR = 0, downG = 0, downB = 0;
+    let count = 0;
+    
+    // 计算上方区域平均颜色
+    for (let ty = y - checkHeight; ty < y; ty++) {
+      for (let x = 0; x < width; x++) {
+        const idx = (ty * width + x) * 4;
+        upR += data[idx];
+        upG += data[idx + 1];
+        upB += data[idx + 2];
+        count++;
+      }
+    }
+    
+    // 计算下方区域平均颜色
+    for (let ty = y + 1; ty <= y + checkHeight; ty++) {
+      for (let x = 0; x < width; x++) {
+        const idx = (ty * width + x) * 4;
+        downR += data[idx];
+        downG += data[idx + 1];
+        downB += data[idx + 2];
+      }
+    }
+    
+    if (count === 0) continue;
+    
+    upR /= count; upG /= count; upB /= count;
+    downR /= count; downG /= count; downB /= count;
+    
+    // 计算颜色差异
+    const colorDiff = Math.abs(upR - downR) + Math.abs(upG - downG) + Math.abs(upB - downB);
+    
+    if (colorDiff > maxColorDiff) {
+      maxColorDiff = colorDiff;
+      bestY = y;
+    }
+  }
+  
+  // 如果颜色差异足够大，返回精确位置；否则返回null
+  return maxColorDiff > 30 ? bestY : null;
+}
+
+// 验证是否为有效的分割线
+function isValidSplitLine(imageData, width, height, y) {
+  return findPreciseSplitLine(imageData, width, height, y) !== null;
 }
 
 function buildModal(slices) {
