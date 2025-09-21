@@ -1,5 +1,3 @@
-// 内容脚本：分割图片并在页面以 Modal 方式展示；每张图片可使用浏览器右键菜单继续操作。
-
 const IS_SPLITTER_STYLE_ID = 'image-splitter-style';
 const IS_MODAL_ID = 'image-splitter-modal';
 const IS_MASK_ID = 'image-splitter-mask';
