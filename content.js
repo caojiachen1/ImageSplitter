@@ -3,6 +3,10 @@
 const IS_SPLITTER_STYLE_ID = 'image-splitter-style';
 const IS_MODAL_ID = 'image-splitter-modal';
 const IS_MASK_ID = 'image-splitter-mask';
+const IS_EDITOR_ID = 'image-splitter-editor';
+const IS_LINES_LAYER_ID = 'image-splitter-lines-layer';
+const IS_MODE_ADD = 'add';
+const IS_MODE_SELECT = 'select';
 
 function ensureStyles() {
   if (document.getElementById(IS_SPLITTER_STYLE_ID)) return;
@@ -21,6 +25,21 @@ function ensureStyles() {
   .is-item{border:1px solid #e5e7eb;border-radius:6px;overflow:hidden;background:#fff}
   .is-item img{display:block;max-width:100%;height:auto}
   .is-footer{padding:10px 14px;border-top:1px solid #eee;background:#fafafa;color:#6b7280;font-size:12px}
+
+  /* Editor styles */
+  .is-editor-wrap{display:flex;flex-direction:column;gap:10px}
+  .is-toolbar{display:flex;align-items:center;gap:8px}
+  .is-badge{font-size:12px;color:#374151;background:#eef2ff;border:1px solid #c7d2fe;border-radius:999px;padding:2px 8px}
+  .is-canvas-outer{position:relative;display:inline-block;max-width:100%;border:1px solid #e5e7eb;border-radius:6px;background:#fff}
+  .is-canvas-inner{position:relative;min-height:200px}
+  .is-img{display:block;max-width:100%;height:auto}
+  .is-lines-layer{position:absolute;left:0;right:0;top:0;bottom:0;pointer-events:auto}
+  .is-line{position:absolute;left:0;width:100%;height:0;border-top:2px solid #f59e0b;cursor:ns-resize;box-shadow:0 0 0 2px rgba(245,158,11,0.15)}
+  .is-line.selected{border-top-color:#ef4444;box-shadow:0 0 0 2px rgba(239,68,68,0.25)}
+  .is-line .handle{position:absolute;left:50%;transform:translate(-50%,-50%);top:0;background:#111827;color:#fff;font-size:10px;padding:2px 6px;border-radius:999px;user-select:none}
+  .is-empty-hint{font-size:12px;color:#6b7280}
+  .is-sep{width:1px;height:16px;background:#e5e7eb}
+  .is-mode-btn.active{background:#111827;color:#fff;border-color:#111827}
   `;
   document.documentElement.appendChild(style);
 }
@@ -494,6 +513,252 @@ function buildModal(slices) {
   document.body.appendChild(modal);
 }
 
+// 打开可编辑分割线的编辑器
+function openSplitEditor(canvas, width, height, initialLines, imageData) {
+  ensureStyles();
+  // 清理已有的弹窗，避免重复
+  const oldMask = document.getElementById(IS_MASK_ID);
+  if (oldMask) oldMask.remove();
+  const oldModal = document.getElementById(IS_MODAL_ID);
+  if (oldModal) oldModal.remove();
+
+  const mask = document.createElement('div');
+  mask.className = 'is-modal-mask';
+  mask.id = IS_MASK_ID;
+  const modal = document.createElement('div');
+  modal.className = 'is-modal';
+  modal.id = IS_MODAL_ID;
+
+  const header = document.createElement('div'); header.className = 'is-header';
+  header.innerHTML = `<div class="is-title">编辑分割线</div>`;
+  const actions = document.createElement('div'); actions.className = 'is-actions';
+  const cancelBtn = document.createElement('button'); cancelBtn.className = 'is-btn'; cancelBtn.textContent = '取消';
+  cancelBtn.addEventListener('click', () => { cleanup(); mask.remove(); modal.remove(); });
+  actions.appendChild(cancelBtn);
+  header.appendChild(actions);
+
+  const body = document.createElement('div'); body.className = 'is-body';
+  const wrap = document.createElement('div'); wrap.className = 'is-editor-wrap';
+  const toolbar = document.createElement('div'); toolbar.className = 'is-toolbar';
+  const badge = document.createElement('span'); badge.className = 'is-badge'; badge.textContent = '分割线编辑器';
+  const addBtn = document.createElement('button'); addBtn.className = 'is-btn is-mode-btn'; addBtn.textContent = '添加 (Ctrl)'; addBtn.dataset.mode = IS_MODE_ADD;
+  const selectBtn = document.createElement('button'); selectBtn.className = 'is-btn is-mode-btn'; selectBtn.textContent = '选择'; selectBtn.dataset.mode = IS_MODE_SELECT;
+  const sep1 = document.createElement('div'); sep1.className = 'is-sep';
+  const autoBtn = document.createElement('button'); autoBtn.className = 'is-btn'; autoBtn.textContent = '自动检测';
+  const clearBtn = document.createElement('button'); clearBtn.className = 'is-btn'; clearBtn.textContent = '清空';
+  const sep2 = document.createElement('div'); sep2.className = 'is-sep';
+  const hint = document.createElement('span'); hint.className = 'is-empty-hint'; hint.textContent = '提示：按住 Ctrl 在图片上单击添加分割线';
+  const spacer = document.createElement('div'); spacer.style.flex = '1';
+  const okBtn = document.createElement('button'); okBtn.className = 'is-btn'; okBtn.textContent = '确认切割';
+  toolbar.append(badge, addBtn, selectBtn, sep1, autoBtn, clearBtn, sep2, hint, spacer, okBtn);
+
+  const outer = document.createElement('div'); outer.className = 'is-canvas-outer';
+  const img = document.createElement('img'); img.className = 'is-img'; img.alt = 'source'; img.src = canvas.toDataURL('image/png');
+  const linesLayer = document.createElement('div'); linesLayer.className = 'is-lines-layer'; linesLayer.id = IS_LINES_LAYER_ID;
+  const inner = document.createElement('div'); inner.className = 'is-canvas-inner';
+  inner.appendChild(img);
+  outer.append(inner, linesLayer);
+
+  wrap.append(toolbar, outer);
+  body.appendChild(wrap);
+
+  const footer = document.createElement('div'); footer.className = 'is-footer';
+  footer.textContent = '拖动分割线可调整位置；Delete 删除选中分割线。';
+
+  modal.append(header, body, footer);
+  document.body.append(mask);
+  document.body.append(modal);
+
+  // 状态与工具
+  let mode = IS_MODE_SELECT;
+  let lines = Array.isArray(initialLines) ? [...initialLines] : [];
+  let selectedIndex = -1;
+  const MIN_GAP = Math.max(8, Math.floor(height * 0.01));
+  const MIN_SLICE = Math.max(20, Math.floor(height * 0.02));
+
+  function setMode(newMode) {
+    mode = newMode;
+    addBtn.classList.toggle('active', mode === IS_MODE_ADD);
+    selectBtn.classList.toggle('active', mode === IS_MODE_SELECT);
+  }
+
+  // 无分割线时默认添加模式
+  if (!lines.length) setMode(IS_MODE_ADD); else setMode(IS_MODE_SELECT);
+
+  function getImageRect() {
+    return img.getBoundingClientRect();
+  }
+  function yImageFromClient(clientY) {
+    const rect = getImageRect();
+    const rel = clientY - rect.top;
+    const ratio = rect.height > 0 ? rel / rect.height : 0;
+    return Math.max(MIN_GAP, Math.min(height - MIN_GAP, Math.round(ratio * height)));
+  }
+  function topPxFromYImage(yImg) {
+    const rect = getImageRect();
+    return (yImg / height) * rect.height;
+  }
+
+  function dedupAndSort() {
+    lines = Array.from(new Set(lines.map(v => Math.max(MIN_GAP, Math.min(height - MIN_GAP, Math.round(v)))))).sort((a, b) => a - b);
+  }
+
+  function updateHint() {
+    hint.style.display = lines.length ? 'none' : 'inline';
+  }
+
+  function renderLines() {
+    // 清空
+    linesLayer.innerHTML = '';
+    lines.forEach((y, idx) => {
+      const line = document.createElement('div');
+      line.className = 'is-line' + (idx === selectedIndex ? ' selected' : '');
+      line.style.top = `${topPxFromYImage(y)}px`;
+      const handle = document.createElement('div'); handle.className = 'handle'; handle.textContent = `${idx + 1}`;
+      line.appendChild(handle);
+      // 选择
+      line.addEventListener('mousedown', (ev) => {
+        if (ev.button !== 0) return; // 仅左键
+        ev.stopPropagation();
+        // 选择
+        selectedIndex = idx;
+        renderLines();
+        // 拖动
+        let startYImage = y;
+        const onMove = (mv) => {
+          const yImg = yImageFromClient(mv.clientY);
+          // 约束于相邻线与边界
+          const prev = idx > 0 ? lines[idx - 1] + MIN_GAP : MIN_GAP;
+          const next = idx < lines.length - 1 ? lines[idx + 1] - MIN_GAP : height - MIN_GAP;
+          const clamped = Math.max(prev, Math.min(next, yImg));
+          if (clamped !== lines[idx]) {
+            lines[idx] = clamped;
+            renderLines();
+          }
+        };
+        const onUp = () => {
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+          dedupAndSort();
+          selectedIndex = lines.indexOf(lines[idx]);
+          renderLines();
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp, { once: true });
+      });
+      linesLayer.appendChild(line);
+    });
+    updateHint();
+  }
+
+  function addLineAt(yImage) {
+    lines.push(yImage);
+    dedupAndSort();
+    selectedIndex = lines.indexOf(yImage);
+    renderLines();
+  }
+
+  // Ctrl+单击添加；添加模式下单击添加
+  linesLayer.addEventListener('mousedown', (ev) => {
+    if (ev.button !== 0) return;
+    const yImg = yImageFromClient(ev.clientY);
+    if (ev.ctrlKey || mode === IS_MODE_ADD) {
+      addLineAt(yImg);
+    } else {
+      // 选择模式下，点击空白取消选择
+      selectedIndex = -1; renderLines();
+    }
+  });
+
+  // 处理缩放导致位置变化
+  window.addEventListener('resize', renderLines);
+  const ro = new (window.ResizeObserver || function(func){ return { observe(){}, disconnect(){} };})(() => renderLines());
+  try { ro.observe(img); } catch {}
+
+  // 按钮交互
+  addBtn.addEventListener('click', () => setMode(IS_MODE_ADD));
+  selectBtn.addEventListener('click', () => setMode(IS_MODE_SELECT));
+  clearBtn.addEventListener('click', () => { lines = []; selectedIndex = -1; setMode(IS_MODE_ADD); renderLines(); });
+  autoBtn.addEventListener('click', () => {
+    try {
+      const detected = detectSplits(imageData, width, height);
+      if (detected && detected.length) {
+        lines = detected.slice();
+        dedupAndSort();
+        setMode(IS_MODE_SELECT);
+        renderLines();
+      } else {
+        alert('未检测到分割线，可手动添加');
+        setMode(IS_MODE_ADD);
+        renderLines();
+      }
+    } catch (e) {
+      alert('自动检测失败：' + toErrorMessage(e));
+    }
+  });
+  okBtn.addEventListener('click', () => {
+    // 验证片段高度
+    const sorted = [...lines].sort((a,b)=>a-b);
+    let prev = 0;
+    for (const y of [...sorted, height]) {
+      if (y - prev < MIN_SLICE) {
+        if (!confirm('有些片段高度过小，仍要继续切割吗？')) return;
+        break;
+      }
+      prev = y;
+    }
+    // 切片
+    finalizeSlicing(canvas, width, height, sorted);
+    cleanup();
+    mask.remove(); modal.remove();
+  });
+
+  // 键盘删除与取消
+  const onKey = (ev) => {
+    if (ev.key === 'Delete' || ev.key === 'Backspace') {
+      if (selectedIndex >= 0) {
+        ev.preventDefault();
+        lines.splice(selectedIndex, 1);
+        selectedIndex = -1;
+        if (!lines.length) setMode(IS_MODE_ADD);
+        renderLines();
+      }
+    } else if (ev.key === 'Escape') {
+      cleanup();
+      mask.remove(); modal.remove();
+    }
+  };
+  document.addEventListener('keydown', onKey);
+  function cleanup(){
+    document.removeEventListener('keydown', onKey);
+    window.removeEventListener('resize', renderLines);
+    try { ro.disconnect(); } catch {}
+  }
+  // 兜底：若节点被外部移除，也执行清理
+  const mo = new (window.MutationObserver || function(){ return { observe(){}, disconnect(){} };})(() => {
+    if (!document.body.contains(modal)) { cleanup(); try{ mo.disconnect(); }catch{} }
+  });
+  try { mo.observe(document.body, { childList: true, subtree: true }); } catch {}
+
+  // 初始化
+  renderLines();
+}
+
+function finalizeSlicing(canvas, width, height, lines) {
+  const allLines = [0, ...lines, height];
+  const slices = [];
+  for (let i = 1; i < allLines.length; i++) {
+    const y0 = allLines[i - 1];
+    const y1 = allLines[i];
+    const h = y1 - y0;
+    const c = document.createElement('canvas');
+    c.width = width; c.height = h;
+    c.getContext('2d').drawImage(canvas, 0, y0, width, h, 0, 0, width, h);
+    slices.push(c.toDataURL('image/png'));
+  }
+  buildModal(slices);
+}
+
 async function getImageDataSafe(srcUrl) {
   // 第一次尝试：常规加载
   const first = await loadImageToCanvas(srcUrl, false);
@@ -556,24 +821,8 @@ async function splitImageBySrc(srcUrl) {
       ({ canvas, ctx, width, height, imageData } = await getImageDataSafe(srcUrl));
     }
     const lines = detectSplits(imageData, width, height);
-    if (!lines.length) {
-      // 无分割点，直接提示并展示整张图，方便继续右键
-      buildModal([canvas.toDataURL('image/png')]);
-      return;
-    }
-    // 切片
-    const allLines = [0, ...lines, height];
-    const slices = [];
-    for (let i = 1; i < allLines.length; i++) {
-      const y0 = allLines[i - 1];
-      const y1 = allLines[i];
-      const h = y1 - y0;
-      const c = document.createElement('canvas');
-      c.width = width; c.height = h;
-      c.getContext('2d').drawImage(canvas, 0, y0, width, h, 0, 0, width, h);
-      slices.push(c.toDataURL('image/png'));
-    }
-    buildModal(slices);
+    // 打开编辑器（即使没有检测到分割线，也允许手动添加）
+    openSplitEditor(canvas, width, height, lines, imageData);
   } catch (e) {
     alert('分割失败：' + toErrorMessage(e, '处理图片时出现问题'));
   } finally {
