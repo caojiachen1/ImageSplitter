@@ -14,7 +14,7 @@ function ensureStyles() {
   style.id = IS_SPLITTER_STYLE_ID;
   style.textContent = `
   .is-modal-mask{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:2147483646;}
-  .is-modal{position:fixed;inset:auto;left:50%;top:50%;transform:translate(-50%,-50%);z-index:2147483647;background:#fff;border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,.2);max-height:85vh;max-width:min(90vw,1200px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #e5e7eb}
+  .is-modal{position:fixed;inset:auto;left:50%;top:50%;transform:translate(-50%,-50%);z-index:2147483647;background:#fff;border-radius:0px;box-shadow:0 10px 30px rgba(0,0,0,.2);max-height:95vh;max-width:min(98vw,1800px);display:flex;flex-direction:column;overflow:hidden;border:1px solid #e5e7eb}
   .is-header{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid #eee;background:#fafafa}
   .is-title{font-size:14px;color:#111;font-weight:600}
   .is-actions{display:flex;gap:8px}
@@ -22,7 +22,7 @@ function ensureStyles() {
   .is-btn:hover{background:#f3f4f6}
   .is-body{padding:12px;overflow:auto}
   .is-grid{display:flex;flex-direction:column;gap:12px}
-  .is-item{border:1px solid #e5e7eb;border-radius:6px;overflow:hidden;background:#fff}
+  .is-item{border:1px solid #e5e7eb;border-radius:0px;overflow:hidden;background:#fff}
   .is-item img{display:block;max-width:100%;height:auto}
   .is-footer{padding:10px 14px;border-top:1px solid #eee;background:#fafafa;color:#6b7280;font-size:12px}
 
@@ -30,7 +30,7 @@ function ensureStyles() {
   .is-editor-wrap{display:flex;flex-direction:column;gap:10px}
   .is-toolbar{display:flex;align-items:center;gap:8px}
   .is-badge{font-size:12px;color:#374151;background:#eef2ff;border:1px solid #c7d2fe;border-radius:999px;padding:2px 8px}
-  .is-canvas-outer{position:relative;display:inline-block;max-width:100%;border:1px solid #e5e7eb;border-radius:6px;background:#fff}
+  .is-canvas-outer{position:relative;display:inline-block;max-width:100%;border:1px solid #e5e7eb;border-radius:0px;background:#fff}
   .is-canvas-inner{position:relative;min-height:200px}
   .is-img{display:block;max-width:100%;height:auto}
   .is-lines-layer{position:absolute;left:0;right:0;top:0;bottom:0;pointer-events:auto}
